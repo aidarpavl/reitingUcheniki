@@ -14,7 +14,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# GitHub RAW сілтемелер
 REITING_URL = "https://raw.githubusercontent.com/aidarpavl/reitingUcheniki/main/reiting%20ucheniki.xlsx"
 BALDAR_URL = "https://raw.githubusercontent.com/aidarpavl/reitingUcheniki/main/%D0%91%D0%B0%D0%BB%D0%B4%D0%B0%D1%80.xlsx"
 PAROL_URL = "https://raw.githubusercontent.com/aidarpavl/reitingUcheniki/main/Parol%20reiting%20ucheniki.xlsx"
@@ -29,24 +28,18 @@ if not os.path.exists(UPLOAD_DIR):
 # ------------------------------
 @st.cache_data(ttl=300)
 def load_excel_from_github(url):
-    """GitHub RAW сілтемесінен Excel жүктеу — БЕЗ заголовков"""
+    """GitHub RAW сілтемесінен Excel жүктеу — без заголовков"""
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
-        df = pd.read_excel(BytesIO(response.content), header=None)
-        return df
+        return pd.read_excel(BytesIO(response.content), header=None)
     except Exception as e:
         st.error(f"❌ Файл жүктеу қатесі: {e}")
         return None
 
 
 def compute_student_score(row):
-    """
-    Оқушының жалпы балын есептеу.
-    4 блок × 4 колонки: Қалалық, Облыстық, Республикалық, Халықаралық.
-    Данные начинаются с колонки 3 (после Нөмір, Сынып, Оқушы).
-    Формула: 1 орын = 3, 2 орын = 2, 3 орын = 1, номинация = 1
-    """
+    """4 блок × 4 колонки: 1ор=3, 2ор=2, 3ор=1, ном=1"""
     score = 0
     for block_start in [3, 7, 11, 15]:
         try:
@@ -69,9 +62,16 @@ def compute_student_score(row):
 
 def prepare_dataframe(df_raw):
     """
-    Ручная обработка двухуровневой шапки.
-    Ищем строку с "номер", затем пропускаем ещё одну строку ("1 орын").
+    Обработка двухуровневой шапки.
+    Возвращает df со всеми 19 столбцами:
+      Нөмір, Сынып, Оқушы,
+      Қал_1, Қал_2, Қал_3, Қал_ном,
+      Обл_1, Обл_2, Обл_3, Обл_ном,
+      Респ_1, Респ_2, Респ_3, Респ_ном,
+      Хал_1, Хал_2, Хал_3, Хал_ном,
+      Жалпы_балл
     """
+    # Ищем строку с "номер"
     header_row_idx = None
     for i in range(min(5, len(df_raw))):
         row_vals = df_raw.iloc[i].astype(str).str.lower().tolist()
@@ -80,35 +80,50 @@ def prepare_dataframe(df_raw):
             break
 
     if header_row_idx is None:
-        header_row_idx = 0
         data_start = 3
     else:
         data_start = header_row_idx + 2
 
     df_data = df_raw.iloc[data_start:].copy().reset_index(drop=True)
 
-    df_data = df_data.rename(columns={
+    # Переименовываем ВСЕ 19 колонок явно
+    rename_map = {
         0: 'Нөмір',
         1: 'Сынып',
-        2: 'Оқушы'
-    })
+        2: 'Оқушы',
+        3: 'Қал_1',   4: 'Қал_2',   5: 'Қал_3',   6: 'Қал_ном',
+        7: 'Обл_1',   8: 'Обл_2',   9: 'Обл_3',  10: 'Обл_ном',
+        11: 'Респ_1', 12: 'Респ_2', 13: 'Респ_3', 14: 'Респ_ном',
+        15: 'Хал_1',  16: 'Хал_2',  17: 'Хал_3',  18: 'Хал_ном',
+    }
+    df_data = df_data.rename(columns=rename_map)
 
+    # Оставляем только эти 19 колонок (если есть больше — обрезаем)
+    keep_cols = list(rename_map.values())
+    df_data = df_data[[c for c in keep_cols if c in df_data.columns]].copy()
+
+    # Чистим строки
     df_data = df_data[df_data['Оқушы'].notna()].copy()
     df_data['Оқушы'] = df_data['Оқушы'].astype(str).str.strip()
     df_data = df_data[df_data['Оқушы'] != ''].copy()
     df_data = df_data[~df_data['Оқушы'].str.lower().isin(['nan', 'none', 'nat'])]
     df_data = df_data[~df_data['Оқушы'].str.lower().str.contains('итог|жалпы|барлығы|total', na=False)]
 
-    df_data['Жалпы_балл'] = df_data.apply(compute_student_score, axis=1)
+    # Все числовые колонки → int (NaN → 0)
+    numeric_cols = [c for c in keep_cols if c not in ['Сынып', 'Оқушы']]
+    for col in numeric_cols:
+        df_data[col] = pd.to_numeric(df_data[col], errors='coerce').fillna(0).astype(int)
 
-    df_data['Нөмір'] = pd.to_numeric(df_data['Нөмір'], errors='coerce').fillna(0).astype(int)
-    df_data['Сынып'] = df_data['Сынып'].astype(str).str.strip()
+    # Оставляем только 19 колонок (без Жалпы_балл — его добавим последним)
+    df_data = df_data[keep_cols].copy()
+
+    # Считаем Жалпы_балл
+    df_data['Жалпы_балл'] = df_data.apply(compute_student_score, axis=1)
 
     return df_data.reset_index(drop=True)
 
 
 def get_top_students(df, n=3):
-    """Үздік оқушылар"""
     df_with_score = df[df['Жалпы_балл'] > 0]
     if len(df_with_score) == 0:
         return df.head(n)
@@ -116,7 +131,6 @@ def get_top_students(df, n=3):
 
 
 def get_struggling_students(df, n=3):
-    """Көмек қажет оқушылар (соңғы орындар, но с баллом > 0)"""
     df_with_score = df[df['Жалпы_балл'] > 0]
     if len(df_with_score) == 0:
         return df.head(n)
@@ -124,31 +138,16 @@ def get_struggling_students(df, n=3):
 
 
 def get_recommendations(score, name):
-    """Оқушыға арналған ұсыныстар"""
     if score >= 20:
-        return f"🏆 **{name}**, сіз өте үздік нәтиже көрсеттіңіз! Осы деңгейді сақтаңыз. Келесі олимпиадаларға қатысуды жалғастырыңыз!"
+        return f"🏆 **{name}**, сіз өте үздік нәтиже көрсеттіңіз! Осы деңгейді сақтаңыз."
     elif score >= 12:
-        return f"✨ **{name}**, жақсы нәтиже! Бірақ әлі де өсуге орын бар. Қосымша дайындық курстарына қатысыңыз."
+        return f"✨ **{name}**, жақсы нәтиже! Қосымша дайындық курстарына қатысыңыз."
     elif score >= 6:
-        return f"📈 **{name}**, қанағаттанарлық нәтиже. Пән мұғалімдерімен кеңесіп, әлсіз тақырыптарды пысықтаңыз."
+        return f"📈 **{name}**, қанағаттанарлық нәтиже. Әлсіз тақырыптарды пысықтаңыз."
     elif score >= 1:
-        return f"⚠️ **{name}**, нәтиже орташадан төмен. Олимпиадаларға дайындықты күшейтіп, топтық жұмыстарға көбірек қатысыңыз."
+        return f"⚠️ **{name}**, нәтиже орташадан төмен. Дайындықты күшейтіңіз."
     else:
-        return f"🌱 **{name}**, әзірге диплом жоқ. Белсенділікті арттырып, мұғалімдермен бірлесіп даму жоспарын құрыңыз."
-
-
-def save_diploma(uploaded_file, student_name, diploma_name):
-    """Дипломды сақтау"""
-    if uploaded_file is not None:
-        file_ext = uploaded_file.name.split('.')[-1]
-        safe_student = student_name.replace(" ", "_")
-        safe_diploma = diploma_name.replace(" ", "_")
-        filename = f"{safe_student}_{safe_diploma}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_ext}"
-        filepath = os.path.join(UPLOAD_DIR, filename)
-        with open(filepath, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        return filepath
-    return None
+        return f"🌱 **{name}**, әзірге диплом жоқ. Белсенділікті арттырыңыз."
 
 
 # ------------------------------
@@ -157,7 +156,7 @@ def save_diploma(uploaded_file, student_name, diploma_name):
 df_raw = load_excel_from_github(REITING_URL)
 
 if df_raw is None:
-    st.error("❌ GitHub-тан файлды жүктеу мүмкін болмады. Сілтемені тексеріңіз.")
+    st.error("❌ GitHub-тан файлды жүктеу мүмкін болмады.")
     st.stop()
 
 df = prepare_dataframe(df_raw)
@@ -167,21 +166,18 @@ df = prepare_dataframe(df_raw)
 # 4. БАСТЫ БЕТ
 # ------------------------------
 st.title("🏆 Оқушылар рейтингі")
-st.caption(f"📅 Соңғы жаңарту: {datetime.now().strftime('%d.%m.%Y %H:%M')} | Барлығы: {len(df)} оқушы")
+st.caption(f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')} | Барлығы: {len(df)} оқушы | Бағандар: {len(df.columns)}")
 
 
-# ========== ОТЛАДКА (можно убрать после проверки) ==========
-with st.expander("🐛 Деректерді тексеру (отладка)", expanded=False):
-    st.write(f"**Сырые данные (df_raw):** {df_raw.shape[0]} строк × {df_raw.shape[1]} колонок")
-    st.write(f"**Обработанные данные (df):** {len(df)} учеников")
-    st.write("**Первые 10 учеников:**")
-    st.dataframe(df[['Нөмір', 'Сынып', 'Оқушы', 'Жалпы_балл']].head(10), use_container_width=True)
-    st.write("**Распределение баллов:**")
-    st.write(df['Жалпы_балл'].describe())
-# ==========================================================
+# ========== ОТЛАДКА ==========
+with st.expander("🐛 Деректерді тексеру", expanded=False):
+    st.write(f"**df_raw:** {df_raw.shape[0]} × {df_raw.shape[1]}")
+    st.write(f"**df:** {len(df)} строк × {len(df.columns)} колонок")
+    st.write(f"**Столбцы df:** {list(df.columns)}")
+    st.dataframe(df.head(10), use_container_width=True)
 
 
-# ========== ЕКІ БАҒАН: ҮЗДІК және КӨМЕК ҚАЖЕТ ==========
+# ========== ТОП-3 және КӨМЕК ҚАЖЕТ ==========
 col1, col2 = st.columns(2)
 
 with col1:
@@ -191,8 +187,7 @@ with col1:
     for i, (_, student) in enumerate(top3.iterrows()):
         st.markdown(f"**{medals[i]}**")
         st.markdown(f"### {student['Оқушы']}")
-        st.markdown(f"`↑ {student['Жалпы_балл']} балл`")
-        st.markdown(f"*Сынып: {student['Сынып']}*")
+        st.markdown(f"`↑ {student['Жалпы_балл']} балл`  |  *{student['Сынып']}*")
         st.markdown("---")
 
 with col2:
@@ -202,12 +197,11 @@ with col2:
     for i, (_, student) in enumerate(struggling.iterrows()):
         st.markdown(f"**{labels[i]}**")
         st.markdown(f"### {student['Оқушы']}")
-        st.markdown(f"`↑ {student['Жалпы_балл']} балл`")
-        st.markdown(f"*Сынып: {student['Сынып']}*")
+        st.markdown(f"`↑ {student['Жалпы_балл']} балл`  |  *{student['Сынып']}*")
         st.markdown("---")
 
 
-# ========== ЖАЛПЫ ИТОГТАР ==========
+# ========== ДИАГРАММА ==========
 st.markdown("## 📊 Оқушылардың жалпы итогтары")
 
 df_with_score = df[df['Жалпы_балл'] > 0].sort_values('Жалпы_балл', ascending=False)
@@ -219,8 +213,8 @@ else:
     st.warning("⚠️ Ешбір оқушы әлі балл жинаған жоқ.")
 
 
-# ========== ТОЛЫҚ КЕСТЕ ==========
-st.markdown("## 📋 Толық кесте")
+# ========== ТОЛЫҚ КЕСТЕ — ВСЕ 19 СТОЛБЦОВ ==========
+st.markdown("## 📋 Толық кесте (барлық бағандар)")
 
 search = st.text_input("🔍 Оқушыны іздеу (аты-жөні немесе сынып):", "")
 
@@ -232,37 +226,27 @@ if search:
 else:
     filtered = df
 
-# Переименуем колонки дипломов для удобства чтения
-df_display = filtered.copy()
-column_names = {
-    3:  'Қал. 1ор', 4:  'Қал. 2ор', 5:  'Қал. 3ор', 6:  'Қал. ном',
-    7:  'Обл. 1ор', 8:  'Обл. 2ор', 9:  'Обл. 3ор', 10: 'Обл. ном',
-    11: 'Респ. 1ор', 12: 'Респ. 2ор', 13: 'Респ. 3ор', 14: 'Респ. ном',
-    15: 'Хал. 1ор', 16: 'Хал. 2ор', 17: 'Хал. 3ор', 18: 'Хал. ном',
-}
-for idx, name in column_names.items():
-    if idx in df_display.columns:
-        df_display = df_display.rename(columns={idx: name})
-
-# Оставляем все нужные колонки
-all_cols = ['Нөмір', 'Сынып', 'Оқушы']
-all_cols += [v for k, v in column_names.items() if k in df_display.columns]
-all_cols += ['Жалпы_балл']
-
-df_display = df_display[all_cols].sort_values('Жалпы_балл', ascending=False)
-
-# Числа → целые для красивого отображения
-for col in all_cols:
-    if col not in ['Сынып', 'Оқушы']:
-        df_display[col] = pd.to_numeric(df_display[col], errors='coerce').fillna(0).astype(int)
+# Сортируем по баллу, показываем ВСЕ колонки (19 + Жалпы_балл = 20)
+filtered_sorted = filtered.sort_values('Жалпы_балл', ascending=False)
 
 st.dataframe(
-    df_display,
+    filtered_sorted,
     use_container_width=True,
-    height=600
+    height=600,
+    column_config={
+        'Нөмір': st.column_config.NumberColumn('№', width='small'),
+        'Сынып': st.column_config.TextColumn('Кл', width='small'),
+        'Оқушы': st.column_config.TextColumn('ФИО', width='medium'),
+        'Жалпы_балл': st.column_config.NumberColumn('Жалпы балл', width='small'),
+    }
 )
 
-st.caption(f"📊 Көрсетілген жолдар: {len(df_display)} | Барлық бағандар: {len(df_display.columns)}")
+st.caption(
+    f"📊 Көрсетілген жолдар: **{len(filtered_sorted)}** | "
+    f"Барлық бағандар: **{len(filtered_sorted.columns)}** "
+    f"(Нөмір, Сынып, Оқушы + 16 диплом + Жалпы балл)"
+)
+
 
 # ========== ҰСЫНЫСТАР ==========
 st.markdown("## 💡 Жеке ұсыныстар")
@@ -273,39 +257,39 @@ selected_student = st.selectbox("Оқушыны таңдаңыз:", student_name
 if selected_student:
     student_row = df[df['Оқушы'] == selected_student].iloc[0]
     score = student_row['Жалпы_балл']
-    rec = get_recommendations(score, selected_student)
-    st.info(rec)
+    st.info(get_recommendations(score, selected_student))
 
     c1, c2 = st.columns(2)
     with c1:
         st.markdown(f"**Сыныбы:** {student_row['Сынып']}")
+    with c2:
         st.markdown(f"**Жалпы балл:** {score}")
 
     st.markdown("### 📊 Блоктар бойынша талдау")
 
     blocks = [
-        ("Қалалық", 3),
-        ("Облыстық", 7),
-        ("Республикалық", 11),
-        ("Халықаралық", 15)
+        ("Қалалық",      ['Қал_1', 'Қал_2', 'Қал_3', 'Қал_ном']),
+        ("Облыстық",     ['Обл_1', 'Обл_2', 'Обл_3', 'Обл_ном']),
+        ("Республикалық",['Респ_1','Респ_2','Респ_3','Респ_ном']),
+        ("Халықаралық",  ['Хал_1', 'Хал_2', 'Хал_3', 'Хал_ном']),
     ]
 
-    for block_name, start_col in blocks:
+    for block_name, cols in blocks:
         try:
-            d1 = int(float(student_row.iloc[start_col])) if pd.notna(student_row.iloc[start_col]) else 0
-            d2 = int(float(student_row.iloc[start_col + 1])) if pd.notna(student_row.iloc[start_col + 1]) else 0
-            d3 = int(float(student_row.iloc[start_col + 2])) if pd.notna(student_row.iloc[start_col + 2]) else 0
-            dn = int(float(student_row.iloc[start_col + 3])) if pd.notna(student_row.iloc[start_col + 3]) else 0
+            d1 = int(student_row[cols[0]])
+            d2 = int(student_row[cols[1]])
+            d3 = int(student_row[cols[2]])
+            dn = int(student_row[cols[3]])
             total = d1 * 3 + d2 * 2 + d3 * 1 + dn * 1
-            if total > 0:
+            if total > 0 or d1+d2+d3+dn > 0:
                 st.markdown(
                     f"- **{block_name}:** 1ор={d1}, 2ор={d2}, 3ор={d3}, ном={dn} → **{total} балл**"
                 )
-        except (ValueError, IndexError, TypeError):
+        except (KeyError, ValueError, TypeError):
             continue
 
 
 # ========== FOOTER ==========
 st.markdown("---")
-st.caption("✅ Рейтинг формуласы: 1 орын = 3 балл, 2 орын = 2 балл, 3 орын = 1 балл, номинация = 1 балл")
+st.caption("✅ 1 орын = 3 балл, 2 орын = 2 балл, 3 орын = 1 балл, номинация = 1 балл")
 st.caption("📌 Деректер көзі: GitHub репозиторийі")
