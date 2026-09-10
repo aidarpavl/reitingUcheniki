@@ -232,13 +232,37 @@ if search:
 else:
     filtered = df
 
-display_cols = ['Нөмір', 'Сынып', 'Оқушы', 'Жалпы_балл']
+# Переименуем колонки дипломов для удобства чтения
+df_display = filtered.copy()
+column_names = {
+    3:  'Қал. 1ор', 4:  'Қал. 2ор', 5:  'Қал. 3ор', 6:  'Қал. ном',
+    7:  'Обл. 1ор', 8:  'Обл. 2ор', 9:  'Обл. 3ор', 10: 'Обл. ном',
+    11: 'Респ. 1ор', 12: 'Респ. 2ор', 13: 'Респ. 3ор', 14: 'Респ. ном',
+    15: 'Хал. 1ор', 16: 'Хал. 2ор', 17: 'Хал. 3ор', 18: 'Хал. ном',
+}
+for idx, name in column_names.items():
+    if idx in df_display.columns:
+        df_display = df_display.rename(columns={idx: name})
+
+# Оставляем все нужные колонки
+all_cols = ['Нөмір', 'Сынып', 'Оқушы']
+all_cols += [v for k, v in column_names.items() if k in df_display.columns]
+all_cols += ['Жалпы_балл']
+
+df_display = df_display[all_cols].sort_values('Жалпы_балл', ascending=False)
+
+# Числа → целые для красивого отображения
+for col in all_cols:
+    if col not in ['Сынып', 'Оқушы']:
+        df_display[col] = pd.to_numeric(df_display[col], errors='coerce').fillna(0).astype(int)
+
 st.dataframe(
-    filtered[display_cols].sort_values('Жалпы_балл', ascending=False),
+    df_display,
     use_container_width=True,
-    height=500
+    height=600
 )
 
+st.caption(f"📊 Көрсетілген жолдар: {len(df_display)} | Барлық бағандар: {len(df_display.columns)}")
 
 # ========== ҰСЫНЫСТАР ==========
 st.markdown("## 💡 Жеке ұсыныстар")
