@@ -2,85 +2,111 @@ import streamlit as st
 import pandas as pd
 import requests
 from io import BytesIO
-import hashlib
-import json
-import os
+import plotly.express as px
+import plotly.graph_objects as go
 from datetime import datetime
+import os
 
 # ------------------------------
 # 1. КОНФИГУРАЦИЯ
 # ------------------------------
-st.set_page_config(page_title="Оқушылар рейтингі", layout="wide")
+st.set_page_config(
+    page_title="Оқушылар рейтингі",
+    page_icon="🏆",
+    layout="wide"
+)
 
-# GitHub RAW файлдардың сілтемелері (ДҰРЫС ЖОЛДАРМЕН АУЫСТЫРЫҢЫЗ)
-REITING_URL = "https://raw.githubusercontent.com/aidarpavl/reitingUcheniki/refs/heads/main/reiting%20ucheniki.xlsx"
-BALDAR_URL = "https://raw.githubusercontent.com/aidarpavl/reitingUcheniki/refs/heads/main/%D0%91%D0%B0%D0%BB%D0%B4%D0%B0%D1%80.xlsx"
-PAROL_URL = "https://raw.githubusercontent.com/aidarpavl/reitingUcheniki/refs/heads/main/Parol%20reiting%20ucheniki.xlsx"
+# GitHub RAW сілтемелер (ДҰРЫС ЖОЛДАР)
+REITING_URL = "https://raw.githubusercontent.com/aidarpavl/reitingUcheniki/main/reiting%20ucheniki.xlsx"
+BALDAR_URL = "https://raw.githubusercontent.com/aidarpavl/reitingUcheniki/main/%D0%91%D0%B0%D0%BB%D0%B4%D0%B0%D1%80.xlsx"
+PAROL_URL = "https://raw.githubusercontent.com/aidarpavl/reitingUcheniki/main/Parol%20reiting%20ucheniki.xlsx"
 
-# Google Drive сақтау орыны (сервис аккаунт керек)
-# Бұл мысалда жергілікті файлға сақтаймыз
-DATA_FILE = "reiting_updated.xlsx"
 UPLOAD_DIR = "diploms"
-
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
 
 # ------------------------------
 # 2. ФУНКЦИЯЛАР
 # ------------------------------
-def load_data_from_github(url):
+@st.cache_data(ttl=300)
+def load_excel_from_github(url):
     """GitHub RAW сілтемесінен Excel жүктеу"""
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=30)
         response.raise_for_status()
         return pd.read_excel(BytesIO(response.content))
     except Exception as e:
-        st.error(f"Файл жүктеу қатесі {url}: {e}")
+        st.error(f"❌ Файл жүктеу қатесі: {e}")
         return None
 
-def save_data_to_github(df, filename="reiting_updated.xlsx"):
-    """Жаңартылған деректерді GitHub-қа push жасау (токен керек)"""
-    # GitHub API арқылы жазу үшін personal access token қажет
-    # Бұл мысалда жергілікті сақтаймыз
-    df.to_excel(DATA_FILE, index=False)
-    st.success("Деректер жергілікті сақталды (GitHub-қа жазу үшін токен керек)")
-    return True
+def compute_student_score(row):
+    """
+    Оқушының жалпы балын есептеу.
+    Формула: 1 орын = 3 балл, 2 орын = 2 балл, 3 орын = 1 балл, номинация = 1 балл
+    """
+    score = 0
+    # Қалалық, Облыстық, Республикалық, Халықаралық блоктар
+    # Әр блок 4 бағаннан тұрады: 1ор, 2ор, 3ор, ном
+    for start_col in range(3, len(row), 4):
+        try:
+            score += (int(row.iloc[start_col] or 0) * 3)      # 1 орын
+            score += (int(row.iloc[start_col + 1] or 0) * 2)  # 2 орын
+            score += (int(row.iloc[start_col + 2] or 0) * 1)  # 3 орын
+            score += (int(row.iloc[start_col + 3] or 0) * 1)  # Номинация
+        except (ValueError, IndexError):
+            continue
+    return score
 
-def check_password(student_name, input_password):
-    """Парольді тексеру"""
-    df_parol = load_data_from_github(PAROL_URL)
-    if df_parol is None:
-        return False
-    # Баған атаулары: Оқушы_аты, Пароль
-    row = df_parol[df_parol.iloc[:, 0].astype(str).str.strip() == student_name.strip()]
-    if len(row) == 0:
-        return False
-    saved_password = str(row.iloc[0, 1]).strip()
-    return input_password == saved_password
+def prepare_dataframe(df):
+    """Деректерді өңдеу: балл есептеу және бағандарды тазалау"""
+    # Екі жолдан кейін деректер басталады (бірінші екі жол - тақырыптар)
+    # Бірақ нақты құрылымды тексерейік
+    df_clean = df.copy()
+    
+    # Бірінші бағандар: номер, кл, ФИО
+    df_clean = df_clean.rename(columns={
+        df_clean.columns[0]: 'Нөмір',
+        df_clean.columns[1]: 'Сынып',
+        df_clean.columns[2]: 'Оқушы'
+    })
+    
+    # Балдарды есептеу
+    df_clean['Жалпы_балл'] = df_clean.apply(compute_student_score, axis=1)
+    
+    # Пустые значения → 0
+    df_clean['Жалпы_балл'] = df_clean['Жалпы_балл'].fillna(0).astype(int)
+    
+    return df_clean
 
-def calculate_rating(df_reiting, df_baldar):
-    """Балдарды есептеу"""
-    # Бірінші баған - оқушы аты, қалғандары - ұпайлар
-    result_df = df_reiting.copy()
-    for col in df_reiting.columns[1:]:  # Оқушы аты бағанын өткізіп
-        if col in df_baldar.columns:
-            result_df[col] = df_reiting[col] * df_baldar[col].iloc[0]
-    return result_df
+def get_top_students(df, n=3):
+    """Үздік оқушыларды алу"""
+    df_sorted = df.sort_values('Жалпы_балл', ascending=False)
+    return df_sorted.head(n)
 
-def get_recommendations(scores_row, threshold=5):
-    """Ұсыныстар генерациялау"""
-    recommendations = []
-    for subject, score in scores_row.items():
-        if score < threshold:
-            recommendations.append(f"📖 {subject} пәні бойынша біліміңізді көтеріңіз (ұпай: {score})")
-    if not recommendations:
-        recommendations.append("✅ Барлық пәндер бойынша жақсы нәтиже!")
-    return recommendations
+def get_struggling_students(df, n=3):
+    """Көмек қажет оқушыларды алу (соңғы орындар)"""
+    df_with_score = df[df['Жалпы_балл'] > 0]  # Тек балл жинағандар
+    if len(df_with_score) == 0:
+        return df.head(n)
+    df_sorted = df_with_score.sort_values('Жалпы_балл', ascending=True)
+    return df_sorted.head(n)
+
+def get_recommendations(score, name):
+    """Оқушыға арналған ұсыныстар"""
+    if score >= 20:
+        return f"🏆 **{name}**, сіз өте үздік нәтиже көрсеттіңіз! Осы деңгейді сақтаңыз. Келесі олимпиадаларға қатысуды жалғастырыңыз!"
+    elif score >= 12:
+        return f"✨ **{name}**, жақсы нәтиже! Бірақ әлі де өсуге орын бар. Қосымша дайындық курстарына қатысыңыз."
+    elif score >= 6:
+        return f"📈 **{name}**, қанағаттанарлық нәтиже. Пән мұғалімдерімен кеңесіп, әлсіз тақырыптарды пысықтаңыз."
+    elif score >= 1:
+        return f"⚠️ **{name}**, нәтиже орташадан төмен. Олимпиадаларға дайындықты күшейтіп, топтық жұмыстарға көбірек қатысыңыз."
+    else:
+        return f"🌱 **{name}**, әзірге диплом жоқ. Белсенділікті арттырып, мұғалімдермен бірлесіп даму жоспарын құрыңыз."
 
 def save_diploma(uploaded_file, student_name, diploma_name):
     """Дипломды сақтау"""
     if uploaded_file is not None:
-        # Файл аты: Оқушы_аты_Диплом_атауы.кеңейту
         file_ext = uploaded_file.name.split('.')[-1]
         safe_student = student_name.replace(" ", "_")
         safe_diploma = diploma_name.replace(" ", "_")
@@ -92,102 +118,138 @@ def save_diploma(uploaded_file, student_name, diploma_name):
     return None
 
 # ------------------------------
-# 3. АУТЕНТИФИКАЦИЯ
+# 3. БАСТАПҚЫ ЖҮКТЕУ
 # ------------------------------
-if 'authenticated' not in st.session_state:
-    st.session_state.authenticated = False
-    st.session_state.current_user = None
-    st.session_state.is_admin = False
-
-if not st.session_state.authenticated:
-    st.title("🔐 Оқушылар рейтингі жүйесіне кіру")
-    student_name = st.text_input("Оқушы аты")
-    password = st.text_input("Пароль", type="password")
-    if st.button("Кіру"):
-        if check_password(student_name, password):
-            st.session_state.authenticated = True
-            st.session_state.current_user = student_name
-            st.session_state.is_admin = (student_name.lower() == "admin")  # Әкімші арнайы
-            st.success("Сәтті кірдіңіз!")
-            st.rerun()
-        else:
-            st.error("Қате пароль немесе оқушы аты")
-    st.stop()
-
-# ------------------------------
-# 4. НЕГІЗГІ ҚОСЫМША
-# ------------------------------
-st.sidebar.title(f"Қош келдіңіз, {st.session_state.current_user}!")
-st.sidebar.button("Шығу", on_click=lambda: st.session_state.update(authenticated=False, current_user=None))
-
 # Деректерді жүктеу
-df_reiting = load_data_from_github(REITING_URL)
-df_baldar = load_data_from_github(BALDAR_URL)
+df_raw = load_excel_from_github(REITING_URL)
 
-if df_reiting is None or df_baldar is None:
-    st.error("Деректерді жүктеу мүмкін емес. GitHub сілтемелерін тексеріңіз.")
+if df_raw is None:
+    st.error("❌ GitHub-тан файлды жүктеу мүмкін болмады. Сілтемені тексеріңіз.")
     st.stop()
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Рейтинг кестесі", "🎓 Диплом салу", "⭐ Рейтинг шығару", "📋 Ұсыныстар"])
+# Деректерді өңдеу
+df = prepare_dataframe(df_raw)
 
 # ------------------------------
-# TAB 1: Кесте және өшіру
+# 4. СТРАНИЦА
 # ------------------------------
-with tab1:
-    st.subheader("Оқушылар рейтингі")
+st.title("🏆 Оқушылар рейтингі")
+st.caption(f"📅 Соңғы жаңарту: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+
+# ========== ЕКІ БАҒАН: ҮЗДІК және КӨМЕК ҚАЖЕТ ==========
+col1, col2 = st.columns(2)
+
+with col1:
+    st.markdown("## 🏆 Үздік оқушылар")
+    top3 = get_top_students(df, 3)
+    medals = ["🥇 1-орын", "🥈 2-орын", "🥉 3-орын"]
+    for i, (_, student) in enumerate(top3.iterrows()):
+        st.markdown(f"**{medals[i]}**")
+        st.markdown(f"### {student['Оқушы']}")
+        st.markdown(f"`↑ {student['Жалпы_балл']} балл`")
+        st.markdown("---")
+
+with col2:
+    st.markdown("## ⚠️ Көмек қажет оқушылар")
+    struggling = get_struggling_students(df, 3)
+    labels = ["1-ең төмен", "2-ең төмен", "3-ең төмен"]
+    for i, (_, student) in enumerate(struggling.iterrows()):
+        st.markdown(f"**{labels[i]}**")
+        st.markdown(f"### {student['Оқушы']}")
+        st.markdown(f"`↑ {student['Жалпы_балл']} балл`")
+        st.markdown("---")
+
+# ========== ЖАЛПЫ ИТОГТАР ==========
+st.markdown("## 📊 Оқушылардың жалпы итогтары")
+
+# Тек балл жинаған оқушыларды көрсету
+df_with_score = df[df['Жалпы_балл'] > 0].sort_values('Жалпы_балл', ascending=False)
+
+if len(df_with_score) > 0:
+    # Диаграмма (бағандық)
+    fig = px.bar(
+        df_with_score.head(30),  # Топ 30
+        x='Оқушы',
+        y='Жалпы_балл',
+        color='Жалпы_балл',
+        color_continuous_scale=['#d73027', '#fee08b', '#1a9850'],
+        labels={'Жалпы_балл': 'Жалпы балл', 'Оқушы': ''},
+        title='Оқушылар рейтингі (Топ 30)'
+    )
+    fig.update_layout(
+        height=500,
+        xaxis_tickangle=-45,
+        showlegend=False,
+        coloraxis_showscale=False
+    )
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.warning("⚠️ Ешбір оқушы әлі балл жинаған жоқ.")
+
+# ========== ТОЛЫҚ КЕСТЕ ==========
+st.markdown("## 📋 Толық кесте")
+
+# Іздеу
+search = st.text_input("🔍 Оқушыны іздеу (аты-жөні немесе сынып):", "")
+
+if search:
+    filtered = df[
+        df['Оқушы'].astype(str).str.contains(search, case=False, na=False) |
+        df['Сынып'].astype(str).str.contains(search, case=False, na=False)
+    ]
+else:
+    filtered = df
+
+# Көрсетілетін бағандар
+display_cols = ['Нөмір', 'Сынып', 'Оқушы', 'Жалпы_балл']
+st.dataframe(
+    filtered[display_cols],
+    use_container_width=True,
+    height=500
+)
+
+# ========== ҰСЫНЫСТАР ==========
+st.markdown("## 💡 Жеке ұсыныстар")
+
+# Оқушыны таңдау
+student_names = df['Оқушы'].tolist()
+selected_student = st.selectbox("Оқушыны таңдаңыз:", student_names)
+
+if selected_student:
+    student_row = df[df['Оқушы'] == selected_student].iloc[0]
+    score = student_row['Жалпы_балл']
+    rec = get_recommendations(score, selected_student)
+    st.info(rec)
     
-    # Кестені көрсету
-    edited_df = st.data_editor(df_reiting, use_container_width=True, key="reiting_table")
+    # Толық статистика
+    st.markdown(f"**Сыныбы:** {student_row['Сынып']}")
+    st.markdown(f"**Жалпы балл:** {score}")
     
-    # Әр жолдың соңында өшіру батырмасы (Streamlit-те қолдан жасау керек)
-    if st.session_state.is_admin:
-        st.write("---")
-        st.write("🗑️ **Әкімшіге арналған өшіру**")
-        row_to_delete = st.number_input("Жол нөмірін енгізіңіз (0-ден бастап)", min_value=0, max_value=len(edited_df)-1, step=1)
-        if st.button("Таңдалған жолды өшіру"):
-            edited_df = edited_df.drop(index=row_to_delete).reset_index(drop=True)
-            save_data_to_github(edited_df)
-            st.rerun()
-    else:
-        st.info("Тек әкімші ғана жолдарды өшіре алады.")
+    # Блоктар бойынша талдау
+    st.markdown("### 📊 Блоктар бойынша талдау")
+    
+    blocks = [
+        ("Қалалық", 3),
+        ("Облыстық", 7),
+        ("Республикалық", 11),
+        ("Халықаралық", 15)
+    ]
+    
+    for block_name, start_col in blocks:
+        try:
+            d1 = int(student_row.iloc[start_col] or 0)
+            d2 = int(student_row.iloc[start_col + 1] or 0)
+            d3 = int(student_row.iloc[start_col + 2] or 0)
+            dn = int(student_row.iloc[start_col + 3] or 0)
+            total = d1 * 3 + d2 * 2 + d3 * 1 + dn * 1
+            if total > 0:
+                st.markdown(
+                    f"- **{block_name}:** 1ор={d1}, 2ор={d2}, 3ор={d3}, ном={dn} → **{total} балл**"
+                )
+        except (ValueError, IndexError):
+            continue
 
-# ------------------------------
-# TAB 2: Диплом салу
-# ------------------------------
-with tab2:
-    st.subheader("🏆 Грамота/Диплом салу")
-    uploaded_file = st.file_uploader("Дипломды таңдаңыз (JPG, PNG, PDF)", type=["jpg", "png", "pdf"])
-    diploma_name = st.text_input("Диплом атауы")
-    if st.button("Дипломды сақтау"):
-        if uploaded_file and diploma_name:
-            filepath = save_diploma(uploaded_file, st.session_state.current_user, diploma_name)
-            if filepath:
-                st.success(f"Диплом сақталды: {filepath}")
-        else:
-            st.warning("Файл және диплом атауы қажет")
-
-# ------------------------------
-# TAB 3: Рейтинг шығару
-# ------------------------------
-with tab3:
-    st.subheader("⭐ Балдарды есептеу")
-    if st.button("Рейтинг шығару"):
-        rated_df = calculate_rating(df_reiting, df_baldar)
-        save_data_to_github(rated_df)
-        st.dataframe(rated_df)
-        st.success("Рейтинг есептелді және сақталды!")
-
-# ------------------------------
-# TAB 4: Ұсыныстар
-# ------------------------------
-with tab4:
-    st.subheader("💡 Оқушыға арналған ұсыныстар")
-    # Ағымдағы оқушының жолын табу
-    user_row = df_reiting[df_reiting.iloc[:, 0].astype(str).str.strip() == st.session_state.current_user.strip()]
-    if len(user_row) > 0:
-        scores = user_row.iloc[0, 1:]  # Оқушы атынсыз ұпайлар
-        recommendations = get_recommendations(scores)
-        for rec in recommendations:
-            st.write(rec)
-    else:
-        st.warning("Сіздің деректеріңіз табылмады")
+# ========== FOOTER ==========
+st.markdown("---")
+st.caption("✅ Рейтинг формуласы: 1 орын = 3 балл, 2 орын = 2 балл, 3 орын = 1 балл, номинация = 1 балл")
+st.caption("📌 Деректер көзі: GitHub репозиторийі")
